@@ -1,5 +1,11 @@
 close all; clear all; clc
 
+p = gcp('nocreate');
+if isempty(p)
+numworkers =8;
+parpool('local', numworkers);
+end
+
 %Load in sample trajectory
 %[Nsample,Nshot,Ndim,Nt] =size(k) %Ndim = 3 for x,y,z,Nt= timeframe
 % k space trajectory normalized between [-0.5,0.5,0.5]
@@ -12,8 +18,8 @@ size(k_space_traj)
 N = 128;
 
 %compute DCF
-gDCF_1 = gDCF_extended_3D(k_space_traj,N,0); %no nufft corection
-gDCF_2 = gDCF_extended_3D(k_space_traj,N,1); %nufft corection
+gDCF_1 = gDCF_extended_3D(k_space_traj,N,0,'Fast'); %no nufft corection
+gDCF_2 = gDCF_extended_3D(k_space_traj,N,1, 'Fast'); %nufft corection
 
 %Plot DCF for one time frame
 figure(1); plot3( k_space_traj(:,:,1), k_space_traj(:,:,2), k_space_traj(:,:,3)) 
@@ -35,8 +41,8 @@ size(k_space_traj)
 N = 128;
 
 %compute DCF
-gDCF_1 = gDCF_extended_3D(k_space_traj,N,0); %no nufft corection
-gDCF_2 = gDCF_extended_3D(k_space_traj,N,1); %nufft corection
+gDCF_1 = gDCF_extended_3D(k_space_traj,N,0, 'Slow'); %no nufft corection
+gDCF_2 = gDCF_extended_3D(k_space_traj,N,1, 'Fast'); %nufft corection
 
 %Plot DCF for one time frame
 figure(3); plot3( k_space_traj(:,:,1), k_space_traj(:,:,2), k_space_traj(:,:,3)) 
