@@ -1,13 +1,16 @@
-function [DCF_time] = gDCF_extended_3D(k,mat,nufft)
+function [DCF_time] = gDCF_extended_3D(k,mat,nufft, speed)
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 % %
 % % Written by Oluyemi Aboyewa
-% % Version 2.0:  December, 2025.
+% % Version 3.0:  December, 2025.
 %Input:
 % %    [Nsample,Nshot,Ndim,Nt] =size(k) %Ndim = 3 for x,y,z,Nt= timeframe
 % %    - k space trajectory normalized between [-0.5,0.5,0.5]
 % %    - mat = recon matrix size 
 % %    - nufft = if 1, gridding kernel corection is applied to gDCF
+% %    - speed = Fast (using kD Tree searcher) or Slow
+% %    - KDTreeSearcher requires Statistics and Machine Learning Toolbox
+
 %Output:
 % %    DCF_time =gDCF
 
@@ -17,52 +20,95 @@ tic
 Ns = size(k, 1);
 Nproj = size(k, 2);
 Nt = size(k,4); 
+DCF_time =zeros(Ns,Nproj,Nt);
 
 for ii=1:Nt
   fprintf( 'TimeFrame = %3d\n', ii );
 
   UnitDistance = 1/(mat); 
 
-  input_X = k(:,:,1,ii);
-  input_Y = k(:,:,2,ii);
-  input_Z = k(:,:,3,ii);
+  switch speed
+      case 'Fast'
+        input_X = k(:,:,1,ii);
+        input_Y = k(:,:,2,ii);
+        input_Z = k(:,:,3,ii);    
+        X = input_X(:); 
+        Y = input_Y(:);
+        Z = input_Z(:);
+        AllPoints = [X, Y, Z]; 
+    
+        DCF = zeros(Ns, Nproj);
+        
+        Mdl = KDTreeSearcher(AllPoints); % Build the K-D Tree 
+    
+        parfor Selected_Proj = 1:Nproj
+    
+            xsel = input_X(:, Selected_Proj);
+            ysel = input_Y(:, Selected_Proj);
+            zsel = input_Z(:, Selected_Proj);
+            QueryPoints = [xsel, ysel, zsel]; 
+    
+            gDCF = zeros(Ns, 1);
+            
+            [~, Distances] = rangesearch(Mdl, QueryPoints, UnitDistance); % Range Search using KDTreeSearcher
+    
+            for Selected_Meas = 1:Ns
+    
+                dist = Distances{Selected_Meas};
+    
+                if ~isempty(dist)
+                    calc_dist = (UnitDistance - dist) / UnitDistance; 
+                    gDCF(Selected_Meas) = 1 / (sum(calc_dist) + eps); 
+                else
+                    gDCF(Selected_Meas) = 0; 
+                end
+            end
+    
+            DCF(:, Selected_Proj) = gDCF;
+        end   
 
-  DCF = zeros(Ns, Nproj);
-
-  parfor Selected_Proj = 1:Nproj
-    xsel = input_X(:, Selected_Proj);
-    ysel = input_Y(:, Selected_Proj);
-    zsel = input_Z(:, Selected_Proj);
-
-    gDCF = zeros(Ns, 1);
-
-    for Selected_Meas = 1:Ns
-      Ref_X = xsel(Selected_Meas);
-      Ref_Y = ysel(Selected_Meas);
-      Ref_Z = zsel(Selected_Meas);
-
-      tmp_a = (input_X >= (Ref_X-UnitDistance)) & (input_X <= (Ref_X+UnitDistance));
-      tmp_b = (input_Y >= (Ref_Y-UnitDistance)) & (input_Y <= (Ref_Y+UnitDistance));
-      tmp_c = (input_Z >= (Ref_Z-UnitDistance)) & (input_Z <= (Ref_Z+UnitDistance));
-      mask = tmp_a & tmp_b & tmp_c;
-      indx_1 = find( mask > 0 );
-
-      if ~isempty(indx_1)
-
-                dist_sq = (Ref_X-input_X(indx_1)).^2 + (Ref_Y-input_Y(indx_1)).^2 + (Ref_Z-input_Z(indx_1)).^2;
-                dist = sqrt(dist_sq);
-
-                calc_dist = (UnitDistance - dist) / UnitDistance; 
-
-        calc_dist(calc_dist < 0) = 0;
-
-        gDCF(Selected_Meas) = 1 / (sum(calc_dist) + eps);
-      else
-        gDCF(Selected_Meas) = 0;
-      end
-    end
-
-    DCF(:, Selected_Proj) = gDCF;
+      case 'Slow'
+          input_X = k(:,:,1,ii);
+          input_Y = k(:,:,2,ii);
+          input_Z = k(:,:,3,ii);
+        
+          DCF = zeros(Ns, Nproj);
+        
+          parfor Selected_Proj = 1:Nproj
+            xsel = input_X(:, Selected_Proj);
+            ysel = input_Y(:, Selected_Proj);
+            zsel = input_Z(:, Selected_Proj);
+        
+            gDCF = zeros(Ns, 1);
+        
+            for Selected_Meas = 1:Ns
+              Ref_X = xsel(Selected_Meas);
+              Ref_Y = ysel(Selected_Meas);
+              Ref_Z = zsel(Selected_Meas);
+        
+              tmp_a = (input_X >= (Ref_X-UnitDistance)) & (input_X <= (Ref_X+UnitDistance));
+              tmp_b = (input_Y >= (Ref_Y-UnitDistance)) & (input_Y <= (Ref_Y+UnitDistance));
+              tmp_c = (input_Z >= (Ref_Z-UnitDistance)) & (input_Z <= (Ref_Z+UnitDistance));
+              mask = tmp_a & tmp_b & tmp_c;
+              indx_1 = find( mask > 0 );
+        
+              if ~isempty(indx_1)
+        
+                        dist_sq = (Ref_X-input_X(indx_1)).^2 + (Ref_Y-input_Y(indx_1)).^2 + (Ref_Z-input_Z(indx_1)).^2;
+                        dist = sqrt(dist_sq);
+        
+                        calc_dist = (UnitDistance - dist) / UnitDistance; 
+        
+                calc_dist(calc_dist < 0) = 0;
+        
+                gDCF(Selected_Meas) = 1 / (sum(calc_dist) + eps);
+              else
+                gDCF(Selected_Meas) = 0;
+              end
+            end
+        
+            DCF(:, Selected_Proj) = gDCF;
+          end
   end
 
  if nufft==1
@@ -93,7 +139,7 @@ for ii=1:Nt
   DCF = reshape(DCF_corrected_vec, [Ns, Nproj]); 
 end
 
-DCF_time(:,:,:,ii) = DCF; 
+DCF_time(:,:,ii) = DCF; 
 end
 DCF_time( find( DCF_time == 0 ) ) = eps;
 elapsedTime = toc;
