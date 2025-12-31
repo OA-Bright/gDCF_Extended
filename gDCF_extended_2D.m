@@ -1,16 +1,18 @@
-function [DCF_time] = gDCF_extended_2D(k,mat,Methods,BL_type,nufft)
+function [DCF_time] = gDCF_extended_2D(k,mat,Methods,BL_type,nufft,speed)
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 % %
 % % Written by Oluyemi Aboyewa
-% % Version 2.0:  December, 2025.
+% % Version 3.0:  December, 2025.
 
 %Input:
 % %    - k space trajectory normalized between [-0.5,0.5]
 % %    - k space dims = [Nreadout Nshots Ntimeframe]
 % %    - mat = recon matrix size 
 % %    - method = select which approximate dealta_k approach ["Nyquist", "Beruling-Landau", generalized-FOV"] 
-% %    - BL_type = Readout type for BL ["center out", "full spoke"] 
+% %    - BL_type = Readout type for BL ["center out", "full spoke"]
 % %    - nufft = if 1, gridding kernel corection is applied to gDCF
+% %    - speed = Fast (using kD Tree searcher) or Slow
+% %    - KDTreeSearcher requires Statistics and Machine Learning Toolbox
 
 %Output:
 % %    - DCF_time = gDCF  
@@ -23,7 +25,7 @@ Ns = size(k, 1);
 Nproj = size(k, 2);
 DCF_time = zeros(size(k));
 
-switch Methods
+switch Methods 
     case 'Nyq'
         UnitDistance = 1/ mat;
     case 'BL'
@@ -37,45 +39,79 @@ switch Methods
         [~, del_k] = LBD(k * mat, lengths, widths);
         UnitDistance = del_k/ mat;
     case 'GEN'
-        UnitDistance = genFOV(k);
+        UnitDistance = genFOV(k,speed);
 
 end
 
 calc_prec =10^9;
-
 input_X = real(k(:,:,1));
 input_Y = imag(k(:,:,1));
 
-[Ang, ~] = cart2pol(real(k), imag(k));
+%for trajectories with multiple time frames with angle rotation from the first
+%otherwise, loop across time frame (see gDCF_3D implementation)
+
+[Ang, ~] = cart2pol(real(k), imag(k)); 
 Ang = mod(Ang, 2 * pi);
 
+%Initialize DCF
 DCF = zeros(Ns, Nproj);
 
-parfor Selected_Proj = 1:Nproj
-    xsel = input_X(:, Selected_Proj);
-    ysel = input_Y(:, Selected_Proj);
-    gDCF = zeros(Ns, 1);
-
-    for Selected_Meas = 1:Ns
-
-        Ref_X = xsel(Selected_Meas);
-        Ref_Y = ysel(Selected_Meas);
-
-        cond = input_X >= Ref_X - UnitDistance & input_X <= Ref_X + UnitDistance & ...
-               input_Y >= Ref_Y - UnitDistance & input_Y <= Ref_Y + UnitDistance;
-        indx_1 = find(cond);
-
-        if ~isempty(indx_1)
-            calc_dist = (UnitDistance - sqrt((Ref_X - input_X(indx_1)).^2 + (Ref_Y - input_Y(indx_1)).^2)) / UnitDistance;
-
-            calc_dist(calc_dist < 0) = 0;
-            gDCF(Selected_Meas) = 1 / sum(calc_dist);
-        else
-            gDCF(Selected_Meas) = 0;
+switch speed
+    case 'Fast'
+        %KDTreeSearcher requires Statistics and Machine Learning Toolbox
+        X = input_X(:); 
+        Y = input_Y(:);
+        AllPoints = [X, Y]; 
+   
+        KD = KDTreeSearcher(AllPoints); % Build the K-D Tree
+        parfor Selected_Proj = 1:Nproj
+            xsel = input_X(:, Selected_Proj);
+            ysel = input_Y(:, Selected_Proj);
+            QueryPoints = [xsel, ysel]; 
+            
+            [~, Distances] = rangesearch(KD, QueryPoints, UnitDistance); % Range Search using KDTreeSearcher
+            gDCF = zeros(Ns, 1);
+             for Selected_Meas = 1:Ns
+        
+                    dist = Distances{Selected_Meas};
+        
+                    if ~isempty(dist)
+                        calc_dist = (UnitDistance - dist) / UnitDistance; 
+                        gDCF(Selected_Meas) = 1 / (sum(calc_dist) + eps); 
+                    else
+                        gDCF(Selected_Meas) = 0; 
+                    end
+             end
+            DCF(:, Selected_Proj) = round(gDCF*calc_prec)/calc_prec;
         end
-    end
 
-    DCF(:, Selected_Proj) = round(gDCF*calc_prec)/calc_prec;
+    case 'Slow'
+        parfor Selected_Proj = 1:Nproj
+            xsel = input_X(:, Selected_Proj);
+            ysel = input_Y(:, Selected_Proj);
+            gDCF = zeros(Ns, 1);
+        
+            for Selected_Meas = 1:Ns
+        
+                Ref_X = xsel(Selected_Meas);
+                Ref_Y = ysel(Selected_Meas);
+        
+                cond = input_X >= Ref_X - UnitDistance & input_X <= Ref_X + UnitDistance & ...
+                       input_Y >= Ref_Y - UnitDistance & input_Y <= Ref_Y + UnitDistance;
+                indx_1 = find(cond);
+        
+                if ~isempty(indx_1)
+                    calc_dist = (UnitDistance - sqrt((Ref_X - input_X(indx_1)).^2 + (Ref_Y - input_Y(indx_1)).^2)) / UnitDistance;
+        
+                    calc_dist(calc_dist < 0) = 0;
+                    gDCF(Selected_Meas) = 1 / sum(calc_dist);
+                else
+                    gDCF(Selected_Meas) = 0;
+                end
+            end
+        
+            DCF(:, Selected_Proj) = round(gDCF*calc_prec)/calc_prec;
+        end
 end
 
 if nufft==1
@@ -114,43 +150,70 @@ disp(['Elapsed time: ' num2str(elapsedTime) ' seconds']);
 end
 
 
-function avg_dist = genFOV(k)
+function avg_dist = genFOV(k,speed)
     % Input:
     % k: (Nsamples x Nproj), representing k-space points
+
     % Output:
     % avg_dist: Average of sorted distances to the six nearest neighbors
+
+ switch speed
+    case 'Fast'
+        [Nsamples, Nproj, ~] = size(k);
+        k_t=k(:,:,1); %only one timeframe used
+        all_samples = [real(k_t(:)), imag(k_t(:))];
+        point_avg_dists = zeros(Nsamples, Nproj); 
     
-    kSpaceMatrix(:, :, 1) = real(k(:,:,1)); 
-    kSpaceMatrix(:, :, 2) = imag(k(:,:,1)); %
-    
-    [Nsamples, Nproj, ~] = size(kSpaceMatrix);
-    avgDistances = zeros(Nsamples * Nproj, 1);
-    
-    parfor pointIndex = 1:(Nsamples * Nproj)
-        %sample and projection indices
-        sample1 = mod(pointIndex - 1, Nsamples) + 1;
-        proj1 = ceil(pointIndex / Nsamples);
-        point1 = squeeze(kSpaceMatrix(sample1, proj1, :));  % Current point
-        distances = zeros(Nsamples * (Nproj - 1), 1);
-        count = 0;
+        parfor p = 1:Nproj
+            % current point
+            idx_current = (p-1)*Nsamples + 1 : p*Nsamples;
+            query_points = all_samples(idx_current, :);
+            
+            % points in other projections
+            idx_others = true(Nsamples * Nproj, 1);
+            idx_others(idx_current) = false;
+            reference_points = all_samples(idx_others, :);
+            
+            % Build kD-Tree for the other projections
+            KD = KDTreeSearcher(reference_points);
+            [~, dists] = knnsearch(KD, query_points, 'K', 6);
+            point_avg_dists(:, p) = mean(dists, 2);
+        end
+        avg_dist = mean(point_avg_dists(:));
+
+    case 'Slow'
+        kSpaceMatrix(:, :, 1) = real(k(:,:,1)); 
+        kSpaceMatrix(:, :, 2) = imag(k(:,:,1)); %
         
-        % Compare with points in other projections
-        for proj2 = 1:Nproj
-            if proj1 ~= proj2
-                points2 = squeeze(kSpaceMatrix(:, proj2, :));
-                dists = sqrt(sum((points2 - point1').^2, 2));
-                distances(count + 1:count + Nsamples) = dists;
-                count = count + Nsamples;
+        [Nsamples, Nproj, ~] = size(kSpaceMatrix);
+        avgDistances = zeros(Nsamples * Nproj, 1);
+        
+        parfor pointIndex = 1:(Nsamples * Nproj)
+            %sample and projection indices
+            sample1 = mod(pointIndex - 1, Nsamples) + 1;
+            proj1 = ceil(pointIndex / Nsamples);
+            point1 = squeeze(kSpaceMatrix(sample1, proj1, :));  % Current point
+            distances = zeros(Nsamples * (Nproj - 1), 1);
+            count = 0;
+            
+            % Compare with points in other projections
+            for proj2 = 1:Nproj
+                if proj1 ~= proj2
+                    points2 = squeeze(kSpaceMatrix(:, proj2, :));
+                    dists = sqrt(sum((points2 - point1').^2, 2));
+                    distances(count + 1:count + Nsamples) = dists;
+                    count = count + Nsamples;
+                end
             end
+            
+            sortedDistances = sort(distances(1:count)); % Sort distances 
+            avgDistances(pointIndex) = mean(sortedDistances(1:min(6, count))); %select 6 nearest neighbors
         end
         
-        sortedDistances = sort(distances(1:count)); % Sort distances 
-        avgDistances(pointIndex) = mean(sortedDistances(1:min(6, count))); %select 6 nearest neighbors
-    end
-    
-    avgDistances = avgDistances(avgDistances > 0);
-    sortedAvgDistances = sort(avgDistances);
-    avg_dist = mean(sortedAvgDistances);
+        avgDistances = avgDistances(avgDistances > 0);
+        sortedAvgDistances = sort(avgDistances);
+        avg_dist = mean(sortedAvgDistances);
+ end
 end
 
 function [D_B, delt_k] = LBD(sample_points, lengths, widths)
